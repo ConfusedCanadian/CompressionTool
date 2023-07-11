@@ -23,72 +23,49 @@ log_writer.writerow(['Time', 'Status', 'File'])
 
 skipped_files = open(os.path.expanduser('~/Desktop/skipped_files.txt'), 'a')
 
-def construct_ffmpeg_command(filepath, temp_filepath, pass_num, audio=False, subtitle_option='', anime=False):
-    """Construct the ffmpeg command line for compressing the video."""
-    video_bitrate = '2500k'
-    audio_bitrate = '192k'
-    cmd = ['ffmpeg', '-y', '-probesize', '50M', '-analyzeduration', '100M', '-i', f'"{filepath}"', '-c:v', 'libx264', '-b:v', video_bitrate, '-pass', pass_num, '-passlogfile', '/dev/shm/ffmpeg2pass']
-
-    if pass_num == '2' and audio:  # For the second pass and when audio is to be included
-        cmd.extend(['-c:a', 'aac', '-b:a', audio_bitrate, subtitle_option])
-
-    if anime and pass_num == '2':  # For the second pass and when anime settings are to be used
-        cmd.extend(['-preset', 'veryslow', '-tune', 'animation', '-vf', 'hqdn3d,gradfun'])
-
-    cmd.append(f'"{temp_filepath}"')
-
-    return cmd
-
-def run_ffmpeg_command(cmd):
-    """Run a given ffmpeg command, raise an exception if it fails."""
-    subprocess.run(' '.join(cmd), shell=True, check=True)
-
-def compress_with_gpu(filepath, temp_filepath):
-    """Compress the video file using GPU-based compression."""
-    # You will need to specify the command line for GPU-based compression
-    pass  # Remove this line when you add the actual GPU-based compression code
-
-def handle_error(filepath, error):
-    """Handle exceptions during compression."""
-    log_error('Failed to compress. Error:', filepath, str(error))
-    if isinstance(error, PermissionError):
-        skipped_files.write(f"{filepath}\n")
-
-def compress_video_file(filepath, anime=False, use_gpu=False):
-    """Compress a video file."""
-    base_filename = os.path.basename(filepath)
-    temp_filepath = os.path.join("/dev/shm", base_filename + "_temp" + os.path.splitext(filepath)[1])
-    subtitle_option = '-scodec mov_text' if filepath.lower().endswith('.mp4') else '-scodec copy'
+def compress_video_file(filepath, anime=False):
     try:
-        if use_gpu:
-            compress_with_gpu(filepath, temp_filepath)
-        else:
-            run_ffmpeg_command(construct_ffmpeg_command(filepath, temp_filepath, '1'))
-            run_ffmpeg_command(construct_ffmpeg_command(filepath, temp_filepath, '2', audio=True, subtitle_option=subtitle_option, anime=anime))
+        # Temporarily save compressed file in ramdisk
+        base_filename = os.path.basename(filepath)
+        temp_filepath = os.path.join("/dev/shm", base_filename + "_temp" + os.path.splitext(filepath)[1])
 
+        # Use target bitrate that should result in ~1GB per hour
+        # Preserve subtitles
+        subtitle_option = '-scodec mov_text' if filepath.lower().endswith('.mp4') else '-scodec copy'
+        cmd = ['ffmpeg', '-y', '-probesize', '50M', '-analyzeduration', '100M', '-i', f'"{filepath}"', '-c:v', 'libx264', '-b:v', '2500k', '-pass', '1', '-passlogfile', '/dev/shm/ffmpeg2pass', '-f', 'null', '-an', '/dev/null', '&&',
+               'ffmpeg', '-probesize', '50M', '-analyzeduration', '100M', '-i', f'"{filepath}"', '-c:v', 'libx264', '-b:v', '2500k', '-pass', '2', '-passlogfile', '/dev/shm/ffmpeg2pass', '-c:a', 'aac', '-b:a', '192k', subtitle_option, f'"{temp_filepath}"']
+        if anime:
+            cmd += ['-preset', 'veryslow', '-tune', 'animation', '-vf', 'hqdn3d,gradfun']
+        subprocess.run(' '.join(cmd), shell=True, check=True)
+
+        # Confirm new file exists and is not empty
         if os.path.exists(temp_filepath) and os.path.getsize(temp_filepath) > 0:
             temp_file_size = os.path.getsize(temp_filepath)
-            file_size = os.path.getsize(filepath)
+            file_size = os.path.getsize(filepath) # Get the size of the original file
+            # Compare sizes of original and compressed files
             if temp_file_size < file_size:
+                # Replace original file with compressed file
                 shutil.copy(temp_filepath, filepath)
                 os.remove(temp_filepath)
                 log_info('Compression successful for', filepath)
             else:
+                # Delete the larger file which is the compressed one
                 os.remove(temp_filepath)
                 log_info('Compressed file was larger. Kept the original file:', filepath)
         else:
             raise Exception("Compressed file is missing or empty")
-
+    except PermissionError:
+        log_error('Failed to compress. File is in use:', filepath)
+        skipped_files.write(f"{filepath}\n")
     except Exception as e:
-        handle_error(filepath, e)
-
+        log_error('Failed to compress. Error:', filepath, str(e))
     finally:
+        # Ensure the temporary file and log files are deleted from ramdisk
         for file in [temp_filepath, '/dev/shm/ffmpeg2pass-0.log.mbtree', '/dev/shm/ffmpeg2pass-0.log']:
             try:
                 os.remove(file)
             except FileNotFoundError:
                 pass
-
 
 def compress_video_files(directory, anime=False, priority=False):
     for foldername, subfolders, filenames in os.walk(directory):
@@ -134,4 +111,3 @@ if __name__ == "__main__":
     log_file.close()
 
 skipped_files.close()
-
