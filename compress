@@ -1,0 +1,137 @@
+#!/usr/bin/env python3
+import os
+import argparse
+import logging
+import csv
+import subprocess
+from multiprocessing import Pool
+import psutil
+import shutil
+import datetime
+
+
+# Define the size threshold in bytes (750 MB = 786432000 bytes)
+SIZE_THRESHOLD = 500 * 1024 * 1024
+
+# Setup logging
+logging.basicConfig(filename=os.path.expanduser('~/Desktop/compress.log'), level=logging.INFO, filemode='a')
+
+# Setup CSV writer for logging
+log_file = open(os.path.expanduser('~/Desktop/compress.csv'), 'a', newline='')
+log_writer = csv.writer(log_file)
+log_writer.writerow(['Time', 'Status', 'File'])
+
+skipped_files = open(os.path.expanduser('~/Desktop/skipped_files.txt'), 'a')
+
+def construct_ffmpeg_command(filepath, temp_filepath, pass_num, audio=False, subtitle_option='', anime=False):
+    """Construct the ffmpeg command line for compressing the video."""
+    video_bitrate = '2500k'
+    audio_bitrate = '192k'
+    cmd = ['ffmpeg', '-y', '-probesize', '50M', '-analyzeduration', '100M', '-i', f'"{filepath}"', '-c:v', 'libx264', '-b:v', video_bitrate, '-pass', pass_num, '-passlogfile', '/dev/shm/ffmpeg2pass']
+
+    if pass_num == '2' and audio:  # For the second pass and when audio is to be included
+        cmd.extend(['-c:a', 'aac', '-b:a', audio_bitrate, subtitle_option])
+
+    if anime and pass_num == '2':  # For the second pass and when anime settings are to be used
+        cmd.extend(['-preset', 'veryslow', '-tune', 'animation', '-vf', 'hqdn3d,gradfun'])
+
+    cmd.append(f'"{temp_filepath}"')
+
+    return cmd
+
+def run_ffmpeg_command(cmd):
+    """Run a given ffmpeg command, raise an exception if it fails."""
+    subprocess.run(' '.join(cmd), shell=True, check=True)
+
+def compress_with_gpu(filepath, temp_filepath):
+    """Compress the video file using GPU-based compression."""
+    # You will need to specify the command line for GPU-based compression
+    pass  # Remove this line when you add the actual GPU-based compression code
+
+def handle_error(filepath, error):
+    """Handle exceptions during compression."""
+    log_error('Failed to compress. Error:', filepath, str(error))
+    if isinstance(error, PermissionError):
+        skipped_files.write(f"{filepath}\n")
+
+def compress_video_file(filepath, anime=False, use_gpu=False):
+    """Compress a video file."""
+    base_filename = os.path.basename(filepath)
+    temp_filepath = os.path.join("/dev/shm", base_filename + "_temp" + os.path.splitext(filepath)[1])
+    subtitle_option = '-scodec mov_text' if filepath.lower().endswith('.mp4') else '-scodec copy'
+    try:
+        if use_gpu:
+            compress_with_gpu(filepath, temp_filepath)
+        else:
+            run_ffmpeg_command(construct_ffmpeg_command(filepath, temp_filepath, '1'))
+            run_ffmpeg_command(construct_ffmpeg_command(filepath, temp_filepath, '2', audio=True, subtitle_option=subtitle_option, anime=anime))
+
+        if os.path.exists(temp_filepath) and os.path.getsize(temp_filepath) > 0:
+            temp_file_size = os.path.getsize(temp_filepath)
+            file_size = os.path.getsize(filepath)
+            if temp_file_size < file_size:
+                shutil.copy(temp_filepath, filepath)
+                os.remove(temp_filepath)
+                log_info('Compression successful for', filepath)
+            else:
+                os.remove(temp_filepath)
+                log_info('Compressed file was larger. Kept the original file:', filepath)
+        else:
+            raise Exception("Compressed file is missing or empty")
+
+    except Exception as e:
+        handle_error(filepath, e)
+
+    finally:
+        for file in [temp_filepath, '/dev/shm/ffmpeg2pass-0.log.mbtree', '/dev/shm/ffmpeg2pass-0.log']:
+            try:
+                os.remove(file)
+            except FileNotFoundError:
+                pass
+
+
+def compress_video_files(directory, anime=False, priority=False):
+    for foldername, subfolders, filenames in os.walk(directory):
+        for filename in filenames:
+            if filename.lower().endswith(('.mp4', '.avi', '.mkv', '.mov', '.flv', '.wmv')):
+                filepath = os.path.join(foldername, filename)
+                compress_video_file(filepath, anime)  # Use regular version
+
+def clean_ffmpeg_logs(directory):
+    if os.path.exists('/dev/shm/ffmpeg_report.log'):
+        os.remove('/dev/shm/ffmpeg_report.log')
+
+def log_info(message, filepath):
+    logging.info(f"{message} {filepath}")
+    log_writer.writerow([str(datetime.datetime.now()), 'Info', filepath])
+
+def log_error(message, filepath, error=''):
+    error_message = f"{message} {filepath}. {error}"
+    if isinstance(error, Exception):
+        error_message += f" Exception type: {type(error).__name__}"
+    logging.error(error_message)
+    log_writer.writerow([str(datetime.datetime.now()), 'Error', filepath])
+
+if __name__ == "__main__":
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description='Compress video files in a directory.')
+    parser.add_argument('directory', nargs='?', default='.', help='The directory to scan for video files.')
+    parser.add_argument('-a', '--anime', action='store_true', help='Use anime-optimized settings for compression.')
+    parser.add_argument('-p', '--priority', action='store_true', help='Set process priority to normal.')
+    args = parser.parse_args()
+
+    # Set process priority
+    p = psutil.Process(os.getpid())
+    p.nice(10 if not args.priority else 0)
+
+    # Call the function on the directory you want to scan
+    compress_video_files(args.directory, anime=args.anime, priority=args.priority)
+
+    # Clean up ffmpeg log files
+    clean_ffmpeg_logs(args.directory)
+
+    # Close the log file
+    log_file.close()
+
+skipped_files.close()
+
